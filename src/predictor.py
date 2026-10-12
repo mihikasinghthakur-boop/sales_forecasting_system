@@ -11,6 +11,17 @@ Provides utilities to:
 Fallback mode: when train.csv is absent (e.g. on Streamlit Cloud), the
 module reads pre-baked category mappings from data/category_maps.json so
 the Forecaster page still works without the full Kaggle dataset.
+
+IMPORTANT — Feature consistency guarantee
+-----------------------------------------
+At training time, family_enc and type_enc are assigned via:
+    df['family_enc'] = df['family'].astype('category').cat.codes
+    df['type_enc']   = df['type'].astype('category').cat.codes
+
+Pandas assigns .cat.codes alphabetically when the Series has no explicit
+CategoricalDtype, so family_codes and type_codes here must also be
+alphabetically ordered to match.  The category_maps.json encodes them the
+same way (sorted alphabetical).
 """
 
 from __future__ import annotations
@@ -29,6 +40,13 @@ import pandas as pd
 
 from src.data_loader import DATA_DIR, FEATURE_COLUMNS, load_raw_data
 from src.model_trainer import BEST_MODEL_PATH, load_model
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Last date in the training dataset (Favorita competition)
+TRAINING_END_DATE = pd.Timestamp("2017-08-15")
 
 # ---------------------------------------------------------------------------
 # JSON fallback helpers
@@ -93,9 +111,37 @@ def _get_recent_oil_price(data_dir: Path = DATA_DIR) -> float:
     if _train_csv_available(data_dir):
         dfs = load_raw_data(data_dir)
         oil = dfs["oil"].copy()
-        oil["dcoilwtico"] = oil["dcoilwtico"].ffill().bfill()
+        oil["dcoilwtico"] = pd.to_numeric(oil["dcoilwtico"], errors="coerce")
+        oil = oil.dropna(subset=["dcoilwtico"]).sort_values("date")
         return float(oil["dcoilwtico"].iloc[-1])
     return _load_category_maps_json()["recent_oil_price"]
+
+
+def _get_median_transactions(store_nbr: int, data_dir: Path = DATA_DIR) -> float:
+    """
+    Return the median transaction count for *store_nbr*.
+
+    Using the store-level median instead of 0 greatly improves prediction
+    quality because the XGBoost model was trained on realistic transaction
+    volumes (median ≈ 1 000–2 000 per store per day).
+    """
+    if _train_csv_available(data_dir):
+        # Compute from raw data (slow but accurate)
+        dfs = load_raw_data(data_dir)
+        tx = dfs["transactions"]
+        store_tx = tx[tx["store_nbr"] == store_nbr]["transactions"]
+        if len(store_tx) == 0:
+            return float(dfs["transactions"]["transactions"].median())
+        return float(store_tx.median())
+
+    # Fallback: use pre-baked map
+    maps = _load_category_maps_json()
+    med_map = maps.get("median_transactions_by_store", {})
+    key = str(store_nbr)
+    if key in med_map:
+        return float(med_map[key])
+    # Final fallback: overall median
+    return float(maps.get("overall_median_transactions", 1393.0))
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +167,7 @@ def build_future_frame(
     end_date     : last forecast date (inclusive)
     store_nbr    : store number (1-54)
     family       : product family string (e.g. 'BEVERAGES')
-    onpromotion  : 0 or 1
+    onpromotion  : 0 or 1  (whether items are on promotion)
     oil_price    : WTI crude price to assume; defaults to most recent known value
     data_dir     : path to raw data (for encoding lookup)
 
@@ -151,6 +197,11 @@ def build_future_frame(
     if oil_price is None:
         oil_price = _get_recent_oil_price(data_dir)
 
+    # --- Transactions: use store-level historical median ---
+    # Using 0 would severely bias predictions (training data median ≈ 1 393).
+    # We use the store's historical median as the best available proxy.
+    median_tx = _get_median_transactions(store_nbr, data_dir)
+
     # --- Build frame ---
     df = pd.DataFrame({"date": dates})
     df["store_nbr"] = store_nbr
@@ -166,10 +217,11 @@ def build_future_frame(
     df["day_of_year"] = df["date"].dt.dayofyear
     df["dcoilwtico"] = oil_price
 
-    # Transactions: use 0 for future (unknown)
-    df["transactions"] = 0
+    # Transactions: store-level historical median (not zero — see note above)
+    df["transactions"] = median_tx
 
-    # is_holiday: 0 for future (simplification)
+    # is_holiday: 0 for future (simplification — holiday data not available for
+    # dates beyond the competition window)
     df["is_holiday"] = 0
 
     return df
@@ -191,10 +243,11 @@ def predict(
     Parameters
     ----------
     start_date, end_date : forecast window (inclusive)
-    store_nbr            : store to forecast
-    family               : product family
-    onpromotion          : promotion flag (0/1)
-    oil_price            : assumed WTI price (optional)
+    store_nbr            : store to forecast (1–54)
+    family               : product family (e.g. 'BEVERAGES')
+    onpromotion          : promotion flag (0 = no promotion, 1 = promotion active)
+    oil_price            : assumed WTI crude price in USD (optional; defaults
+                           to last known value from training data ≈ $47.26)
     model_path           : path to saved .joblib model
     data_dir             : path to raw data folder
 
@@ -202,6 +255,14 @@ def predict(
     -------
     DataFrame with columns: date, store_nbr, family, onpromotion,
                              predicted_sales
+
+    Notes
+    -----
+    - The model was trained on Favorita data through 2017-08-15.
+      Forecasts for dates beyond 2017-08-15 are extrapolations.
+    - Predictions are clipped to ≥ 0 (sales cannot be negative).
+    - The 'transactions' feature uses the store's historical median as a
+      proxy for unknown future transaction volumes.
     """
     model = load_model(model_path)
     future_df = build_future_frame(

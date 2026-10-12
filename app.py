@@ -39,7 +39,7 @@ from src.eda import (
     plot_top_families,
 )
 from src.model_trainer import BEST_MODEL_PATH, train_and_evaluate
-from src.predictor import predict
+from src.predictor import TRAINING_END_DATE, predict
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page Config & Global CSS
@@ -188,6 +188,17 @@ st.markdown(
     .metric-card h3 { color: #a78bfa; font-size: 1rem; margin: 0; }
     .metric-card .val { color: #f8fafc; font-size: 1.8rem; font-weight: 700; }
     .metric-card .label { color: #64748b; font-size: 0.78rem; }
+
+    /* ── Info box ── */
+    .info-box {
+        background: rgba(56,189,248,0.08);
+        border: 1px solid rgba(56,189,248,0.25);
+        border-radius: 10px;
+        padding: 1rem 1.2rem;
+        margin: 0.5rem 0;
+        font-size: 0.88rem;
+        color: #94a3b8;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -203,6 +214,8 @@ if "train_results" not in st.session_state:
     st.session_state["train_results"] = None
 if "data_loaded" not in st.session_state:
     st.session_state["data_loaded"] = False
+if "forecast" not in st.session_state:
+    st.session_state["forecast"] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar Navigation
@@ -227,7 +240,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["📈  Dashboard & EDA", "🤖  Model Training", "🔮  Sales Forecaster"],
+        ["🔮  Sales Forecaster", "📈  Dashboard & EDA", "🤖  Model Training"],
         label_visibility="collapsed",
     )
 
@@ -237,30 +250,34 @@ with st.sidebar:
     data_ok = DATA_DIR.exists() and (DATA_DIR / "train.csv").exists()
     json_ok = DATA_DIR.exists() and (DATA_DIR / "category_maps.json").exists()
     if data_ok:
-        st.success("✅ Data folder detected", icon="✅")
+        st.success("✅ Full dataset available", icon="✅")
     elif json_ok:
-        st.info("ℹ️ Lite mode (no train.csv)", icon="ℹ️")
+        st.info("ℹ️ Lite mode — Forecaster active", icon="ℹ️")
     else:
         st.error("❌ data/ folder missing", icon="❌")
 
     model_ok = BEST_MODEL_PATH.exists()
     if model_ok:
-        st.success("✅ Trained model found", icon="✅")
+        st.success("✅ Trained model loaded", icon="✅")
     else:
         st.warning("⚠️ No trained model yet", icon="⚠️")
 
     st.markdown(
         """
-        <div style='position:absolute; bottom:1.5rem; left:0; right:0;
-                    text-align:center; color:#475569; font-size:0.72rem;'>
-            Favorita Sales Dataset · 2013–2017
+        <div style='margin-top:1rem; padding: 0.8rem; background: rgba(167,139,250,0.06);
+                    border: 1px solid rgba(167,139,250,0.15); border-radius: 8px;
+                    font-size:0.72rem; color:#64748b;'>
+            <b style='color:#a78bfa;'>Dataset</b><br>
+            Favorita Store Sales<br>
+            Ecuador · 2013–2017<br>
+            54 stores · 33 product families
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Utility: data guard
+# Utility: data guard (only for pages that need train.csv)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _check_data_dir() -> bool:
@@ -291,7 +308,303 @@ def _check_data_dir() -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE 1 — Dashboard & EDA
+# PAGE 1 — Sales Forecaster  (works WITHOUT train.csv)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_forecaster():
+    st.markdown(
+        """
+        <div class='hero-banner'>
+            <p class='hero-title'>🔮 Sales Forecaster</p>
+            <p class='hero-sub'>
+                Select a store, product family, and date range to generate
+                AI-powered sales predictions using a trained XGBoost model.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── Model guard ────────────────────────────────────────────────────────
+    if not BEST_MODEL_PATH.exists():
+        st.warning(
+            "⚠️ **No trained model found.**\n\n"
+            "Please go to **🤖 Model Training** and train the pipeline first. "
+            "You will need the full dataset for that step.",
+            icon="⚠️",
+        )
+        return
+
+    # ── Load category options (works with JSON fallback) ───────────────────
+    try:
+        cats = get_category_maps()
+    except Exception as exc:
+        st.error(f"❌ Could not load category metadata: {exc}")
+        return
+
+    # ── Model info banner ──────────────────────────────────────────────────
+    with st.expander("ℹ️ About this forecast — important notes", expanded=False):
+        st.markdown(
+            f"""
+            **Model**: XGBoost Regressor (500 trees, chronological train/test split)
+
+            **Training data**: Favorita Store Sales — Ecuador, 2013-01-01 → **{TRAINING_END_DATE.date()}**
+
+            **Features used** ({len(FEATURE_COLUMNS)}):
+            `store_nbr`, `family_enc`, `onpromotion`, `type_enc` (store type),
+            `cluster`, `day_of_week`, `month`, `is_weekend`, `quarter`, `year`,
+            `day_of_year`, `dcoilwtico` (oil price), `transactions` (store median),
+            `is_holiday`
+
+            **Limitations**:
+            - Forecasts beyond {TRAINING_END_DATE.date()} are **extrapolations** —
+              the model has never seen those dates. Uncertainty increases with
+              forecast horizon.
+            - Future transactions and holidays are unknown; the model uses
+              historical store medians and assumes no holidays.
+            - This is a point forecast — no confidence intervals are provided.
+            - Predictions reflect patterns learned from Ecuador 2013–2017 and
+              should not be used for actual business decisions without validation.
+            """
+        )
+
+    # ── Input controls ─────────────────────────────────────────────────────
+    st.markdown("#### ⚙️ Forecast Parameters")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        default_start = pd.Timestamp("2017-08-16").date()
+        default_end = pd.Timestamp("2017-09-15").date()
+
+        start_date = st.date_input(
+            "Forecast Start Date",
+            value=default_start,
+            min_value=pd.Timestamp("2013-01-01").date(),
+            max_value=pd.Timestamp("2025-12-31").date(),
+            key="fc_start",
+        )
+        end_date = st.date_input(
+            "Forecast End Date",
+            value=default_end,
+            min_value=pd.Timestamp("2013-01-01").date(),
+            max_value=pd.Timestamp("2025-12-31").date(),
+            key="fc_end",
+        )
+
+    with col2:
+        store_nbr = st.selectbox(
+            "Store Number",
+            options=cats["store_numbers"],
+            index=0,
+            key="fc_store",
+        )
+        families = cats["families"]
+        default_family_idx = families.index("BEVERAGES") if "BEVERAGES" in families else 0
+        family = st.selectbox(
+            "Product Family",
+            options=families,
+            index=default_family_idx,
+            key="fc_family",
+        )
+
+    col3, col4 = st.columns(2)
+    with col3:
+        onpromotion = st.toggle(
+            "Items on Promotion",
+            value=False,
+            key="fc_promo",
+            help="Whether the product family is running a promotion during this period.",
+        )
+    with col4:
+        oil_price = st.number_input(
+            "Assumed WTI Oil Price (USD)",
+            min_value=20.0,
+            max_value=200.0,
+            value=47.26,
+            step=0.5,
+            key="fc_oil",
+            help="WTI crude oil price assumption. Training-period median ≈ $47/bbl.",
+        )
+
+    # ── Date validation ────────────────────────────────────────────────────
+    if end_date <= start_date:
+        st.warning("⚠️ End date must be after start date.", icon="⚠️")
+        return
+
+    n_days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days + 1
+
+    # Warn when forecasting far beyond training window
+    forecast_start_ts = pd.Timestamp(start_date)
+    if forecast_start_ts > TRAINING_END_DATE:
+        days_beyond = (forecast_start_ts - TRAINING_END_DATE).days
+        st.warning(
+            f"⚠️ **Extrapolation warning**: Your forecast starts "
+            f"**{days_beyond} days after** the training data ends "
+            f"({TRAINING_END_DATE.date()}). Accuracy decreases for dates "
+            "further from the training window.",
+            icon="⚠️",
+        )
+    elif forecast_start_ts < TRAINING_END_DATE:
+        st.info(
+            "ℹ️ You are forecasting within the **training period** "
+            f"(data ends {TRAINING_END_DATE.date()}). "
+            "These predictions can be compared against known actuals if you "
+            "have the train.csv file.",
+            icon="ℹ️",
+        )
+
+    st.caption(f"Forecast window: **{n_days} days** ({start_date} → {end_date})")
+
+    st.markdown("---")
+
+    # ── Run forecast ───────────────────────────────────────────────────────
+    if st.button("🔮 Generate Forecast", key="btn_forecast"):
+        with st.spinner(f"Generating {n_days}-day sales forecast…"):
+            try:
+                forecast_df = predict(
+                    start_date=start_date,
+                    end_date=end_date,
+                    store_nbr=store_nbr,
+                    family=family,
+                    onpromotion=int(onpromotion),
+                    oil_price=oil_price,
+                )
+                st.session_state["forecast"] = forecast_df
+                st.session_state["forecast_meta"] = {
+                    "store_nbr": store_nbr,
+                    "family": family,
+                    "onpromotion": onpromotion,
+                }
+            except Exception as exc:
+                st.error(f"❌ Forecast failed: {exc}")
+                return
+
+    # ── Show results ───────────────────────────────────────────────────────
+    forecast_df = st.session_state.get("forecast")
+    if forecast_df is not None and not forecast_df.empty:
+        st.markdown("---")
+        st.markdown("#### 📈 Forecast Results")
+
+        # KPIs
+        total_pred = forecast_df["predicted_sales"].sum()
+        avg_pred = forecast_df["predicted_sales"].mean()
+        peak_idx = forecast_df["predicted_sales"].idxmax()
+        peak = forecast_df.loc[peak_idx]
+        trough_idx = forecast_df["predicted_sales"].idxmin()
+        trough = forecast_df.loc[trough_idx]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Predicted Sales", f"{total_pred:,.1f}")
+        c2.metric("Daily Average", f"{avg_pred:,.2f}")
+        peak_date = peak["date"]
+        if hasattr(peak_date, "date"):
+            peak_date = peak_date.date()
+        c3.metric("Peak Day", f"{peak_date}", f"{peak['predicted_sales']:,.2f} units")
+        trough_date = trough["date"]
+        if hasattr(trough_date, "date"):
+            trough_date = trough_date.date()
+        c4.metric("Lowest Day", f"{trough_date}", f"{trough['predicted_sales']:,.2f} units")
+
+        # Chart
+        meta = st.session_state.get("forecast_meta", {})
+        _store = meta.get("store_nbr", store_nbr)
+        _family = meta.get("family", family)
+        _promo = meta.get("onpromotion", onpromotion)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=forecast_df["date"],
+            y=forecast_df["predicted_sales"],
+            mode="lines+markers",
+            name="Predicted Sales",
+            line=dict(color="#a78bfa", width=2.5),
+            marker=dict(size=5, color="#6C63FF",
+                        line=dict(color="#a78bfa", width=1.5)),
+            fill="tozeroy",
+            fillcolor="rgba(108,99,255,0.12)",
+            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>Sales: %{y:,.2f}<extra></extra>",
+        ))
+        # Add a dashed line at training end if it falls in range
+        if pd.Timestamp(start_date) <= TRAINING_END_DATE <= pd.Timestamp(end_date):
+            fig.add_vline(
+                x=TRAINING_END_DATE,
+                line_dash="dash",
+                line_color="rgba(251,191,36,0.6)",
+                annotation_text="Training data ends",
+                annotation_font_color="#fbbf24",
+            )
+        fig.update_layout(
+            title=dict(
+                text=f"Forecast · Store {_store} · {_family} · "
+                     f"{'Promotion ON' if _promo else 'No Promotion'}",
+                font=dict(color="#a78bfa", size=16),
+            ),
+            xaxis=dict(title="Date", gridcolor="rgba(255,255,255,0.08)"),
+            yaxis=dict(title="Predicted Sales (units)", gridcolor="rgba(255,255,255,0.08)"),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#E2E8F0", family="Inter, sans-serif"),
+            legend=dict(bgcolor="rgba(0,0,0,0.3)"),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Weekday pattern insight
+        forecast_df["day_name"] = pd.to_datetime(forecast_df["date"]).dt.day_name()
+        by_day = forecast_df.groupby("day_name")["predicted_sales"].mean().reindex(
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        )
+        if not by_day.isna().all():
+            fig_day = px.bar(
+                x=by_day.index,
+                y=by_day.values,
+                labels={"x": "Day of Week", "y": "Avg Predicted Sales"},
+                color=by_day.values,
+                color_continuous_scale="Purples",
+                title="Average Predicted Sales by Day of Week",
+            )
+            fig_day.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#E2E8F0", family="Inter, sans-serif"),
+                showlegend=False,
+                coloraxis_showscale=False,
+                title_font_color="#a78bfa",
+            )
+            fig_day.update_xaxes(gridcolor="rgba(255,255,255,0.08)")
+            fig_day.update_yaxes(gridcolor="rgba(255,255,255,0.08)")
+            st.plotly_chart(fig_day, use_container_width=True)
+
+        # Data table
+        with st.expander("📋 View Raw Forecast Table", expanded=False):
+            display_df = forecast_df[["date", "store_nbr", "family", "onpromotion", "predicted_sales"]].copy()
+            display_df["date"] = pd.to_datetime(display_df["date"]).dt.date
+            display_df["onpromotion"] = display_df["onpromotion"].map({0: "No", 1: "Yes"})
+            display_df.columns = ["Date", "Store", "Family", "On Promotion", "Predicted Sales"]
+            st.dataframe(
+                display_df.style.background_gradient(
+                    subset=["Predicted Sales"], cmap="Purples"
+                ).format({"Predicted Sales": "{:.2f}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # CSV download
+        csv_data = forecast_df[["date", "store_nbr", "family", "onpromotion", "predicted_sales"]].copy()
+        csv_data["date"] = pd.to_datetime(csv_data["date"]).dt.date
+        csv = csv_data.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Download Forecast as CSV",
+            data=csv,
+            file_name=f"forecast_store{_store}_{_family}_{start_date}_{end_date}.csv",
+            mime="text/csv",
+            key="dl_forecast",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 2 — Dashboard & EDA
 # ─────────────────────────────────────────────────────────────────────────────
 
 def page_dashboard():
@@ -328,17 +641,46 @@ def page_dashboard():
     total_sales = df["sales"].sum()
     n_stores = df["store_nbr"].nunique()
     n_families = df["family"].nunique() if "family" in df.columns else "—"
-    date_range = f"{df['date'].min().date()} → {df['date'].max().date()}"
+    date_min = df["date"].min()
+    date_max = df["date"].max()
+    date_range = f"{date_min.date()} → {date_max.date()}"
+    avg_daily = df.groupby("date")["sales"].sum().mean()
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Sales", f"{total_sales:,.0f}")
     c2.metric("Stores", n_stores)
     c3.metric("Product Families", n_families)
-    c4.metric("Date Range", date_range)
+    c4.metric("Avg Daily Sales", f"{avg_daily:,.0f}")
+    c5.metric("Date Range", date_range)
 
     st.markdown("---")
 
-    # ── Data Schema & Stats ────────────────────────────────────────────────
+    # ── Data quality summary ───────────────────────────────────────────────
+    with st.expander("🔍 Data Quality Report", expanded=False):
+        total_rows = len(df)
+        missing_counts = df[FEATURE_COLUMNS + ["sales"]].isna().sum()
+        missing_df = missing_counts[missing_counts > 0].reset_index()
+        missing_df.columns = ["Column", "Missing Count"]
+        missing_df["Missing %"] = (missing_df["Missing Count"] / total_rows * 100).round(2)
+
+        col_q1, col_q2 = st.columns(2)
+        with col_q1:
+            st.metric("Total Rows", f"{total_rows:,}")
+            st.metric("Total Columns", len(df.columns))
+            st.metric("Zero-sales rows", f"{(df['sales'] == 0).sum():,}")
+        with col_q2:
+            st.metric("Negative sales rows", f"{(df['sales'] < 0).sum():,}")
+            st.metric("Duplicate rows", f"{df.duplicated().sum():,}")
+            if len(missing_df) > 0:
+                st.metric("Columns with missing values", len(missing_df))
+            else:
+                st.metric("Missing values", "None ✅")
+
+        if len(missing_df) > 0:
+            st.dataframe(missing_df, use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ No missing values in feature columns after preprocessing.")
+
     with st.expander("🗂️ Data Schema & Sample Rows", expanded=False):
         col_info = pd.DataFrame({
             "Column": df.columns,
@@ -360,32 +702,44 @@ def page_dashboard():
     # ── Interactive Charts ────────────────────────────────────────────────
     st.markdown("### 📉 Historical Sales Trends")
     with st.spinner("Rendering sales trend chart…"):
-        fig1 = plot_sales_trend(df)
-        st.plotly_chart(fig1, use_container_width=True)
+        try:
+            fig1 = plot_sales_trend(df)
+            st.plotly_chart(fig1, use_container_width=True)
+        except Exception as exc:
+            st.error(f"❌ Could not render sales trend: {exc}")
 
     col_a, col_b = st.columns(2)
 
     with col_a:
         st.markdown("### 🏪 Sales by Store Type & Cluster")
         with st.spinner("Rendering store-type chart…"):
-            fig2 = plot_sales_by_store_type(df)
-            st.plotly_chart(fig2, use_container_width=True)
+            try:
+                fig2 = plot_sales_by_store_type(df)
+                st.plotly_chart(fig2, use_container_width=True)
+            except Exception as exc:
+                st.error(f"❌ Could not render store-type chart: {exc}")
 
     with col_b:
         st.markdown("### 🏷️ Promotion Impact")
         with st.spinner("Rendering promotion chart…"):
-            fig3 = plot_promotion_impact(df)
-            st.plotly_chart(fig3, use_container_width=True)
+            try:
+                fig3 = plot_promotion_impact(df)
+                st.plotly_chart(fig3, use_container_width=True)
+            except Exception as exc:
+                st.error(f"❌ Could not render promotion chart: {exc}")
 
     st.markdown("### 🛒 Top Product Families")
     top_n = st.slider("Number of families to show", 5, 33, 15)
     with st.spinner("Rendering top families chart…"):
-        fig4 = plot_top_families(df, top_n=top_n)
-        st.plotly_chart(fig4, use_container_width=True)
+        try:
+            fig4 = plot_top_families(df, top_n=top_n)
+            st.plotly_chart(fig4, use_container_width=True)
+        except Exception as exc:
+            st.error(f"❌ Could not render families chart: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE 2 — Model Training
+# PAGE 3 — Model Training
 # ─────────────────────────────────────────────────────────────────────────────
 
 def page_training():
@@ -403,6 +757,27 @@ def page_training():
 
     if not _check_data_dir():
         return
+
+    # ── Model info ─────────────────────────────────────────────────────────
+    with st.expander("ℹ️ About the ML pipeline", expanded=False):
+        st.markdown(
+            f"""
+            **Baseline**: `LinearRegression` (StandardScaler → LinearRegression)
+
+            **Primary**: `XGBRegressor` (500 trees, learning_rate=0.05, max_depth=6,
+            subsample=0.8, colsample_bytree=0.8, min_child_weight=3)
+
+            **Split strategy**: Chronological time-based split — the last `test_fraction`
+            of unique dates forms the test set. This prevents data leakage that random
+            splitting would cause in time-series problems.
+
+            **Features** ({len(FEATURE_COLUMNS)}): {', '.join(f'`{f}`' for f in FEATURE_COLUMNS)}
+
+            **Target**: `sales` (unit sales per day, per store, per product family)
+
+            **Evaluation**: RMSE & MAE on the held-out chronological test set.
+            """
+        )
 
     st.markdown("#### Step 1 — Load & Preprocess Data")
     st.caption(
@@ -443,9 +818,15 @@ def page_training():
         help="The last X% of dates will be reserved as the test set.",
     )
 
+    # Compute cutoff preview
+    df_preview = st.session_state["df"]
+    sorted_dates = sorted(df_preview["date"].unique())
+    n_test_preview = max(1, int(len(sorted_dates) * test_frac))
+    cutoff_preview = sorted_dates[-n_test_preview]
     st.info(
-        "**Models**: LinearRegression (baseline) vs XGBRegressor (500 trees)\n\n"
-        "**Split**: Chronological — no data leakage\n\n"
+        f"**Models**: LinearRegression (baseline) vs XGBRegressor (500 trees)\n\n"
+        f"**Split**: Chronological — train on dates before **{pd.Timestamp(cutoff_preview).date()}**, "
+        f"test on {n_test_preview} dates after\n\n"
         "**Metrics**: RMSE & MAE on held-out test dates",
         icon="ℹ️",
     )
@@ -520,6 +901,22 @@ def page_training():
             hide_index=True,
         )
 
+        # Interpretation note
+        st.markdown(
+            f"""
+            <div class='info-box'>
+            <b>How to interpret these metrics:</b><br>
+            • <b>RMSE</b> (Root Mean Squared Error): Average prediction error in <em>sales units</em>.
+              Lower is better. Penalises large errors more than MAE.<br>
+            • <b>MAE</b> (Mean Absolute Error): Average absolute error in <em>sales units</em>.
+              Lower is better. More robust to outliers than RMSE.<br>
+            • Evaluated on the chronological holdout — dates after {pd.Timestamp(results['cutoff_date']).date()}.<br>
+            • No future information was used during training.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         # Split info
         c1, c2, c3 = st.columns(3)
         c1.metric("Train Rows", f"{results['train_size']:,}")
@@ -538,7 +935,7 @@ def page_training():
                 )
 
         # Visualise metrics comparison
-        st.markdown("#### 📉 RMSE Comparison")
+        st.markdown("#### 📉 RMSE vs MAE Comparison")
         fig_metrics = go.Figure()
         model_names = list(metrics.keys())
         rmse_vals = [metrics[m]["rmse"] for m in model_names]
@@ -557,206 +954,21 @@ def page_training():
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#E2E8F0"),
             legend=dict(bgcolor="rgba(0,0,0,0.3)"),
-            yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
-            title="Error Metrics Comparison",
+            yaxis=dict(gridcolor="rgba(255,255,255,0.08)", title="Error (sales units)"),
+            xaxis=dict(title="Model"),
+            title=dict(text="Error Metrics Comparison (lower = better)",
+                       font=dict(color="#a78bfa")),
         )
         st.plotly_chart(fig_metrics, use_container_width=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PAGE 3 — Sales Forecaster
-# ─────────────────────────────────────────────────────────────────────────────
-
-def page_forecaster():
-    st.markdown(
-        """
-        <div class='hero-banner'>
-            <p class='hero-title'>🔮 Sales Forecaster</p>
-            <p class='hero-sub'>
-                Select a future date range, store, and product family to generate AI-powered sales predictions.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if not _check_data_dir():
-        return
-
-    if not BEST_MODEL_PATH.exists():
-        st.warning(
-            "⚠️ No trained model found. Please go to **🤖 Model Training** and train the pipeline first.",
-            icon="⚠️",
-        )
-        return
-
-    # ── Load category options ──────────────────────────────────────────────
-    try:
-        cats = get_category_maps()
-    except Exception as exc:
-        st.error(f"❌ Could not load category metadata: {exc}")
-        return
-
-    # ── Input controls ─────────────────────────────────────────────────────
-    st.markdown("#### ⚙️ Forecast Parameters")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        start_date = st.date_input(
-            "Forecast Start Date",
-            value=pd.Timestamp("2017-08-16").date(),
-            min_value=pd.Timestamp("2017-01-01").date(),
-            max_value=pd.Timestamp("2025-12-31").date(),
-            key="fc_start",
-        )
-        end_date = st.date_input(
-            "Forecast End Date",
-            value=pd.Timestamp("2017-09-15").date(),
-            min_value=pd.Timestamp("2017-01-01").date(),
-            max_value=pd.Timestamp("2025-12-31").date(),
-            key="fc_end",
-        )
-
-    with col2:
-        store_nbr = st.selectbox(
-            "Store Number",
-            options=cats["store_numbers"],
-            index=0,
-            key="fc_store",
-        )
-        family = st.selectbox(
-            "Product Family",
-            options=cats["families"],
-            index=cats["families"].index("BEVERAGES") if "BEVERAGES" in cats["families"] else 0,
-            key="fc_family",
-        )
-
-    col3, col4 = st.columns(2)
-    with col3:
-        onpromotion = st.toggle(
-            "Items on Promotion",
-            value=False,
-            key="fc_promo",
-            help="Whether the product family is running a promotion during this period.",
-        )
-    with col4:
-        oil_price = st.number_input(
-            "Assumed WTI Oil Price (USD)",
-            min_value=20.0,
-            max_value=200.0,
-            value=50.0,
-            step=0.5,
-            key="fc_oil",
-            help="WTI crude oil price assumption for the forecast period.",
-        )
-
-    st.markdown("---")
-
-    # ── Validate date range ────────────────────────────────────────────────
-    if end_date <= start_date:
-        st.warning("⚠️ End date must be after start date.", icon="⚠️")
-        return
-
-    n_days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days + 1
-    st.caption(f"Forecast window: **{n_days} days** ({start_date} → {end_date})")
-
-    # ── Run forecast ───────────────────────────────────────────────────────
-    if st.button("🔮 Generate Forecast", key="btn_forecast"):
-        with st.spinner(f"Generating {n_days}-day sales forecast…"):
-            try:
-                forecast_df = predict(
-                    start_date=start_date,
-                    end_date=end_date,
-                    store_nbr=store_nbr,
-                    family=family,
-                    onpromotion=int(onpromotion),
-                    oil_price=oil_price,
-                )
-                st.session_state["forecast"] = forecast_df
-            except Exception as exc:
-                st.error(f"❌ Forecast failed: {exc}")
-                return
-
-    # ── Show results ───────────────────────────────────────────────────────
-    forecast_df = st.session_state.get("forecast")
-    if forecast_df is not None and not forecast_df.empty:
-        st.markdown("---")
-        st.markdown("#### 📈 Forecast Results")
-
-        # KPIs
-        total_pred = forecast_df["predicted_sales"].sum()
-        avg_pred = forecast_df["predicted_sales"].mean()
-        peak = forecast_df.loc[forecast_df["predicted_sales"].idxmax()]
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Predicted Sales", f"{total_pred:,.2f}")
-        c2.metric("Daily Average", f"{avg_pred:,.2f}")
-        c3.metric("Peak Day", f"{peak['date'].date()} ({peak['predicted_sales']:,.2f})")
-
-        # Chart
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=forecast_df["date"],
-            y=forecast_df["predicted_sales"],
-            mode="lines+markers",
-            name="Predicted Sales",
-            line=dict(color="#a78bfa", width=2.5),
-            marker=dict(size=6, color="#6C63FF",
-                        line=dict(color="#a78bfa", width=1.5)),
-            fill="tozeroy",
-            fillcolor="rgba(108,99,255,0.12)",
-        ))
-        fig.update_layout(
-            title=dict(
-                text=f"Forecast · Store {store_nbr} · {family} · "
-                     f"{'Promotion ON' if onpromotion else 'No Promotion'}",
-                font=dict(color="#a78bfa", size=16),
-            ),
-            xaxis=dict(title="Date", gridcolor="rgba(255,255,255,0.08)"),
-            yaxis=dict(title="Predicted Sales", gridcolor="rgba(255,255,255,0.08)"),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#E2E8F0", family="Inter, sans-serif"),
-            legend=dict(bgcolor="rgba(0,0,0,0.3)"),
-            hovermode="x unified",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Data table
-        with st.expander("📋 View Raw Forecast Table", expanded=False):
-            display_df = forecast_df.copy()
-            display_df["date"] = display_df["date"].dt.date
-            display_df["onpromotion"] = display_df["onpromotion"].map(
-                {0: "No", 1: "Yes"}
-            )
-            display_df.columns = ["Date", "Store", "Family", "On Promotion", "Predicted Sales"]
-            st.dataframe(
-                display_df.style.background_gradient(
-                    subset=["Predicted Sales"], cmap="Purples"
-                ).format({"Predicted Sales": "{:.2f}"}),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        # CSV download
-        csv = forecast_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="⬇️ Download Forecast as CSV",
-            data=csv,
-            file_name=f"forecast_store{store_nbr}_{family}_{start_date}_{end_date}.csv",
-            mime="text/csv",
-            key="dl_forecast",
-        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Router
 # ─────────────────────────────────────────────────────────────────────────────
 
-if page == "📈  Dashboard & EDA":
+if page == "🔮  Sales Forecaster":
+    page_forecaster()
+elif page == "📈  Dashboard & EDA":
     page_dashboard()
 elif page == "🤖  Model Training":
     page_training()
-elif page == "🔮  Sales Forecaster":
-    page_forecaster()
