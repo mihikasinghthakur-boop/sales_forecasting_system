@@ -235,8 +235,11 @@ with st.sidebar:
 
     # Data status indicator
     data_ok = DATA_DIR.exists() and (DATA_DIR / "train.csv").exists()
+    json_ok = DATA_DIR.exists() and (DATA_DIR / "category_maps.json").exists()
     if data_ok:
         st.success("✅ Data folder detected", icon="✅")
+    elif json_ok:
+        st.info("ℹ️ Lite mode (no train.csv)", icon="ℹ️")
     else:
         st.error("❌ data/ folder missing", icon="❌")
 
@@ -261,7 +264,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _check_data_dir() -> bool:
-    """Return True if data directory and train.csv exist; else show error."""
+    """Return True if data directory and train.csv exist; else show info banner."""
     if not DATA_DIR.exists():
         st.error(
             f"❌ **Data directory not found**: `{DATA_DIR}`\n\n"
@@ -272,7 +275,17 @@ def _check_data_dir() -> bool:
         )
         return False
     if not (DATA_DIR / "train.csv").exists():
-        st.error("❌ `train.csv` is missing from the `data/` directory.", icon="❌")
+        st.info(
+            "📦 **`train.csv` is not available in this deployment.**\n\n"
+            "The **Dashboard & EDA** and **Model Training** pages require the full "
+            "Kaggle *Store Sales* dataset (~116 MB).\n\n"
+            "👉 Download it from "
+            "[Kaggle — Store Sales Time Series Forecasting]("
+            "https://www.kaggle.com/competitions/store-sales-time-series-forecasting/data) "
+            "and place `train.csv` in the `data/` folder to enable these features.\n\n"
+            "💡 The **🔮 Sales Forecaster** page works without the dataset — try it!",
+            icon="ℹ️",
+        )
         return False
     return True
 

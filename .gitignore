@@ -75,4 +75,8 @@ tmp/
 node_modules/
 
 # ── Streamlit Cache ───────────────────────────────────────────────────────────
+# Only exclude secrets — config.toml must be committed for Streamlit Cloud
 .streamlit/secrets.toml
+
+# ── Pre-baked category maps (must be committed for Streamlit Cloud) ───────────
+!data/category_maps.json

@@ -10,6 +10,7 @@ engineers temporal features ready for machine learning.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -214,17 +215,41 @@ def build_dataset(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
 def get_category_maps(data_dir: str | Path = DATA_DIR) -> dict[str, list]:
     """
     Return mappings needed by the prediction UI.
-    Returns dict with 'families', 'store_numbers', 'store_types'.
+    Returns dict with 'families', 'store_numbers', 'store_types', 'clusters'.
+
+    Falls back to data/category_maps.json when train.csv is absent
+    (e.g. on Streamlit Community Cloud without the full Kaggle dataset).
     """
-    dfs = load_raw_data(data_dir)
-    train = dfs["train"]
-    stores = dfs["stores"]
-    return {
-        "families": sorted(train["family"].unique().tolist()),
-        "store_numbers": sorted(train["store_nbr"].unique().tolist()),
-        "store_types": sorted(stores["type"].unique().tolist()),
-        "clusters": sorted(stores["cluster"].unique().tolist()),
-    }
+    data_dir = Path(data_dir)
+    train_csv = data_dir / "train.csv"
+    json_path = data_dir / "category_maps.json"
+
+    if train_csv.exists():
+        dfs = load_raw_data(data_dir)
+        train = dfs["train"]
+        stores = dfs["stores"]
+        return {
+            "families": sorted(train["family"].unique().tolist()),
+            "store_numbers": sorted(train["store_nbr"].unique().tolist()),
+            "store_types": sorted(stores["type"].unique().tolist()),
+            "clusters": sorted(stores["cluster"].unique().tolist()),
+        }
+
+    # Fallback: use pre-baked JSON (works on Streamlit Cloud)
+    if json_path.exists():
+        with open(json_path, "r") as fh:
+            maps = json.load(fh)
+        return {
+            "families": maps["families"],
+            "store_numbers": maps["store_numbers"],
+            "store_types": maps["store_types"],
+            "clusters": maps["clusters"],
+        }
+
+    raise FileNotFoundError(
+        f"Neither train.csv nor category_maps.json found in {data_dir}. "
+        "Cannot load category maps."
+    )
 
 
 # ---------------------------------------------------------------------------

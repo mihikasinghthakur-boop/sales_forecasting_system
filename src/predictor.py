@@ -7,10 +7,15 @@ Provides utilities to:
   - Load the serialised model artifact
   - Build a feature-complete future DataFrame from user inputs
   - Run inference and return a structured forecast table
+
+Fallback mode: when train.csv is absent (e.g. on Streamlit Cloud), the
+module reads pre-baked category mappings from data/category_maps.json so
+the Forecaster page still works without the full Kaggle dataset.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -26,36 +31,71 @@ from src.data_loader import DATA_DIR, FEATURE_COLUMNS, load_raw_data
 from src.model_trainer import BEST_MODEL_PATH, load_model
 
 # ---------------------------------------------------------------------------
+# JSON fallback helpers
+# ---------------------------------------------------------------------------
+
+_CATEGORY_MAPS_PATH = DATA_DIR / "category_maps.json"
+
+
+def _load_category_maps_json() -> dict:
+    """Load the pre-baked category_maps.json (used when train.csv is absent)."""
+    if not _CATEGORY_MAPS_PATH.exists():
+        raise FileNotFoundError(
+            f"Neither train.csv nor category_maps.json found in {DATA_DIR}. "
+            "Cannot run predictions."
+        )
+    with open(_CATEGORY_MAPS_PATH, "r") as fh:
+        return json.load(fh)
+
+
+def _train_csv_available(data_dir: Path = DATA_DIR) -> bool:
+    """Return True if train.csv is present in data_dir."""
+    return (data_dir / "train.csv").exists()
+
+# ---------------------------------------------------------------------------
 # Category encoding helpers (must mirror data_loader.preprocess)
 # ---------------------------------------------------------------------------
 
 
 def _get_family_codes(data_dir: Path = DATA_DIR) -> dict[str, int]:
     """Return {family_name: category_code} consistent with training encoding."""
-    dfs = load_raw_data(data_dir)
-    families = sorted(dfs["train"]["family"].unique())
-    return {f: i for i, f in enumerate(families)}
+    if _train_csv_available(data_dir):
+        dfs = load_raw_data(data_dir)
+        families = sorted(dfs["train"]["family"].unique())
+        return {f: i for i, f in enumerate(families)}
+    return _load_category_maps_json()["family_codes"]
 
 
 def _get_type_codes(data_dir: Path = DATA_DIR) -> dict[str, int]:
     """Return {store_type: category_code} consistent with training encoding."""
-    dfs = load_raw_data(data_dir)
-    types = sorted(dfs["stores"]["type"].unique())
-    return {t: i for i, t in enumerate(types)}
+    if _train_csv_available(data_dir):
+        dfs = load_raw_data(data_dir)
+        types = sorted(dfs["stores"]["type"].unique())
+        return {t: i for i, t in enumerate(types)}
+    return _load_category_maps_json()["type_codes"]
 
 
 def _get_store_meta(data_dir: Path = DATA_DIR) -> pd.DataFrame:
     """Return stores DataFrame (store_nbr, type, cluster)."""
-    dfs = load_raw_data(data_dir)
-    return dfs["stores"][["store_nbr", "type", "cluster"]].copy()
+    if _train_csv_available(data_dir):
+        dfs = load_raw_data(data_dir)
+        return dfs["stores"][["store_nbr", "type", "cluster"]].copy()
+    maps = _load_category_maps_json()["store_meta"]
+    rows = [
+        {"store_nbr": int(k), "type": v["type"], "cluster": v["cluster"]}
+        for k, v in maps.items()
+    ]
+    return pd.DataFrame(rows)
 
 
 def _get_recent_oil_price(data_dir: Path = DATA_DIR) -> float:
     """Return the most recent non-null oil price from the dataset."""
-    dfs = load_raw_data(data_dir)
-    oil = dfs["oil"].copy()
-    oil["dcoilwtico"] = oil["dcoilwtico"].ffill().bfill()
-    return float(oil["dcoilwtico"].iloc[-1])
+    if _train_csv_available(data_dir):
+        dfs = load_raw_data(data_dir)
+        oil = dfs["oil"].copy()
+        oil["dcoilwtico"] = oil["dcoilwtico"].ffill().bfill()
+        return float(oil["dcoilwtico"].iloc[-1])
+    return _load_category_maps_json()["recent_oil_price"]
 
 
 # ---------------------------------------------------------------------------
