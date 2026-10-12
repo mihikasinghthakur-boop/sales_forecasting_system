@@ -1,0 +1,78 @@
+# ── Virtual Environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ── Environment Variables & Secrets ──────────────────────────────────────────
+.env
+.env.*
+*.env
+secrets.*
+*.key
+*.pem
+*.p12
+config.ini
+
+# ── Python Cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# ── Distribution / Packaging ──────────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+
+# ── Testing & Coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ── Jupyter Notebooks ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── IDE & Editor Files ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# ── OS Generated ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Large Data Files (Kaggle dataset — too large for GitHub) ──────────────────
+data/train.csv
+data/test.csv
+data/sample_submission.csv
+
+# ── Installer Scripts ─────────────────────────────────────────────────────────
+get-pip.py
+
+# ── Logs & Temporary Files ────────────────────────────────────────────────────
+*.log
+*.tmp
+*.temp
+logs/
+tmp/
+
+# ── Node (if any frontend tooling is added later) ─────────────────────────────
+node_modules/
+
+# ── Streamlit Cache ───────────────────────────────────────────────────────────
+.streamlit/secrets.toml
