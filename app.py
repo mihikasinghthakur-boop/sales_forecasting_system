@@ -27,8 +27,12 @@ if str(ROOT) not in sys.path:
 from src.data_loader import (
     DATA_DIR,
     FEATURE_COLUMNS,
+    TARGET_COLUMN,
     build_dataset,
     get_category_maps,
+    load_raw_data,
+    merge_tables,
+    preprocess,
 )
 from src.eda import (
     get_summary_stats,
@@ -413,8 +417,11 @@ st.markdown(_CSS, unsafe_allow_html=True)
 # SESSION STATE
 # ═══════════════════════════════════════════════════════════════════════════
 
-for _k, _v in [("df", None), ("train_results", None), ("data_loaded", False),
-                ("forecast", None), ("forecast_meta", {})]:
+for _k, _v in [
+    ("df", None), ("train_results", None), ("data_loaded", False),
+    ("forecast", None), ("forecast_meta", {}),
+    ("uploaded_df", None), ("upload_source", "builtin"),
+]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -872,6 +879,65 @@ def page_forecaster():
     _footer()
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# UPLOAD HELPERS
+# ───────────────────────────────────────────────────────────────────────────
+
+_REQUIRED_UPLOAD_COLS = {"date", "store_nbr", "family", "sales", "onpromotion"}
+_SAMPLE_CSV = """date,store_nbr,family,sales,onpromotion
+2017-01-01,1,BEVERAGES,1423.5,0
+2017-01-02,1,BEVERAGES,1389.0,0
+2017-01-03,1,BEVERAGES,1601.2,1
+2017-01-04,1,GROCERY I,3214.8,0
+2017-01-05,1,GROCERY I,2987.3,1
+2017-01-06,2,BEVERAGES,1100.0,0
+2017-01-07,2,GROCERY I,2650.0,0
+"""
+
+
+def _validate_upload(df_raw: pd.DataFrame) -> tuple[bool, str]:
+    """Check uploaded CSV has required columns and valid types. Returns (ok, msg)."""
+    missing = _REQUIRED_UPLOAD_COLS - set(df_raw.columns)
+    if missing:
+        return False, f"Missing required columns: {sorted(missing)}"
+    if df_raw.empty:
+        return False, "Uploaded file is empty."
+    try:
+        df_copy = df_raw.copy()
+        df_copy["date"] = pd.to_datetime(df_copy["date"], errors="coerce")
+        bad_dates = int(df_copy["date"].isna().sum())
+        if bad_dates > 0:
+            return False, f"{bad_dates} rows have unparseable date values."
+    except Exception as exc:
+        return False, f"Could not parse 'date' column: {exc}"
+    df_copy["sales"] = pd.to_numeric(df_copy["sales"], errors="coerce")
+    bad_sales = int(df_copy["sales"].isna().sum())
+    if bad_sales > 0:
+        return False, f"{bad_sales} rows have non-numeric 'sales' values."
+    return True, ""
+
+
+def _preprocess_upload(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Lightweight preprocess for user-uploaded CSVs (no external CSVs available)."""
+    df = df_raw.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["sales"] = pd.to_numeric(df["sales"], errors="coerce").fillna(0)
+    df["onpromotion"] = pd.to_numeric(df["onpromotion"], errors="coerce").fillna(0).astype(int)
+    df["store_nbr"] = pd.to_numeric(df["store_nbr"], errors="coerce").fillna(0).astype(int)
+    df["day_of_week"] = df["date"].dt.dayofweek
+    df["month"] = df["date"].dt.month
+    df["is_weekend"] = df["day_of_week"].isin([5, 6]).astype(int)
+    df["quarter"] = df["date"].dt.quarter
+    df["year"] = df["date"].dt.year
+    df["day_of_year"] = df["date"].dt.dayofyear
+    df["family_enc"] = df["family"].astype("category").cat.codes
+    for col in ["type_enc", "cluster", "dcoilwtico", "transactions", "is_holiday", "type"]:
+        if col not in df.columns:
+            df[col] = 0
+    df = df.sort_values("date").reset_index(drop=True)
+    return df
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE 2 — DASHBOARD & EDA
 # ═══════════════════════════════════════════════════════════════════════════
@@ -879,146 +945,100 @@ def page_forecaster():
 def page_dashboard():
     st.markdown("""
     <div class="page-hero">
-      <h1>Dashboard & Exploratory Analysis</h1>
-      <div class="subtitle">Historical patterns, data quality, and interactive visualisations of the Favorita dataset.</div>
+      <h1>Dashboard &amp; Exploratory Analysis</h1>
+      <div class="subtitle">Historical patterns, data quality, and interactive visualisations.
+      Analyse the built-in Favorita dataset or upload your own compatible CSV.</div>
     </div>
     """, unsafe_allow_html=True)
 
-    if not _check_data_dir():
+    # ── Dataset source selector ──────────────────────────────────────────
+    st.markdown('<div class="section-label">Data Source</div>', unsafe_allow_html=True)
+    src_cols = st.columns([2, 3])
+    with src_cols[0]:
+        data_source = st.radio(
+            "Choose dataset",
+            ["Built-in Favorita dataset", "Upload my own CSV"],
+            key="dash_source",
+            label_visibility="collapsed",
+        )
+
+    df = None
+    with src_cols[1]:
+        if data_source == "Upload my own CSV":
+            st.markdown(
+                '<div class="callout callout-indigo">'
+                '<b>Required columns:</b> <code>date</code>, <code>store_nbr</code>, '
+                '<code>family</code>, <code>sales</code>, <code>onpromotion</code><br>'
+                'Date format: YYYY-MM-DD &nbsp;|&nbsp; Sales: numeric &nbsp;|&nbsp; '
+                'On Promotion: 0 or 1'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            st.download_button(
+                "⬇️ Download sample template CSV",
+                data=_SAMPLE_CSV.encode(),
+                file_name="sales_template.csv",
+                mime="text/csv",
+                key="dl_template",
+            )
+            uploaded = st.file_uploader(
+                "Upload CSV file",
+                type=["csv"],
+                key="dash_upload",
+                label_visibility="collapsed",
+            )
+            if uploaded is not None:
+                try:
+                    raw = pd.read_csv(uploaded, low_memory=False)
+                    ok, msg = _validate_upload(raw)
+                    if not ok:
+                        st.error(f"Upload validation failed: {msg}")
+                    else:
+                        df = _preprocess_upload(raw)
+                        st.session_state["uploaded_df"] = df
+                        st.success(
+                            f"✅ Uploaded {len(df):,} rows · "
+                            f"{df['date'].min().date()} → {df['date'].max().date()}"
+                        )
+                except Exception as exc:
+                    st.error(f"Could not read file: {exc}")
+            else:
+                df = st.session_state.get("uploaded_df")
+                if df is None:
+                    st.info("Upload a CSV file above to begin analysis.")
+                    _footer()
+                    return
+
+    # ── Load built-in data if needed ───────────────────────────────────
+    if data_source == "Built-in Favorita dataset":
+        if not _check_data_dir():
+            _footer()
+            return
+        if not st.session_state["data_loaded"] or st.session_state["df"] is None:
+            with st.spinner("Loading and merging CSV files — this takes ~15 seconds…"):
+                try:
+                    df = build_dataset()
+                    st.session_state["df"] = df
+                    st.session_state["data_loaded"] = True
+                except Exception as exc:
+                    st.error(f"Failed to load data: {exc}")
+                    return
+        else:
+            df = st.session_state["df"]
+
+    if df is None:
         _footer()
         return
 
-    # Load data
-    if not st.session_state["data_loaded"] or st.session_state["df"] is None:
-        with st.spinner("Loading and merging CSV files — this takes ~15 seconds…"):
-            try:
-                df = build_dataset()
-                st.session_state["df"] = df
-                st.session_state["data_loaded"] = True
-            except Exception as exc:
-                st.error(f"Failed to load data: {exc}")
-                return
-    else:
-        df = st.session_state["df"]
-
-    # ── KPI row ──────────────────────────────────────────────────────────────
+    # ── KPI row ───────────────────────────────────────────────────────
     total_sales  = df["sales"].sum()
     avg_daily    = df.groupby("date")["sales"].sum().mean()
     n_stores     = df["store_nbr"].nunique()
-    n_families   = df["family"].nunique() if "family" in df.columns else "—"
+    n_families   = df["family"].nunique() if "family" in df.columns else "N/A"
     n_rows       = len(df)
     date_min     = df["date"].min()
     date_max     = df["date"].max()
     date_span    = (date_max - date_min).days
-
-    # YoY growth (last year vs. penultimate year)
-    df_yr = df.copy()
-    df_yr["year"] = pd.to_datetime(df_yr["date"]).dt.year
-    yr_sales = df_yr.groupby("year")["sales"].sum()
-    years = sorted(yr_sales.index)
-    if len(years) >= 2:
-        yoy = (yr_sales[years[-1]] - yr_sales[years[-2]]) / yr_sales[years[-2]] * 100
-        yoy_str = f"{yoy:+.1f}% YoY"
-    else:
-        yoy_str = "—"
-
-    st.markdown('<div class="section-label">Key Metrics</div>', unsafe_allow_html=True)
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total Sales", f"{total_sales/1e6:.2f}M", help="Aggregate unit sales across all stores and families")
-    m2.metric("Daily Average", f"{avg_daily:,.0f}", help="Mean total daily sales across all stores")
-    m3.metric("Stores", n_stores)
-    m4.metric("Product Families", n_families)
-    m5.metric("YoY Growth", yoy_str, help=f"{years[-1]} vs {years[-2]}" if len(years) >= 2 else "")
-
-    # ── Insight ───────────────────────────────────────────────────────────────
-    top_family = df.groupby("family")["sales"].sum().idxmax() if "family" in df.columns else "—"
-    top_store  = df.groupby("store_nbr")["sales"].sum().idxmax()
-    st.markdown(
-        f'<div class="insight-card" style="margin:0.8rem 0 1.5rem;">'
-        f'<strong>Dataset snapshot:</strong> {n_rows:,} records spanning '
-        f'<strong>{date_span} days</strong> ({date_min.date()} → {date_max.date()}). '
-        f'Top-selling family: <strong>{top_family}</strong>. '
-        f'Highest-volume store: <strong>Store {top_store}</strong>. '
-        f'{"Last full year saw " + yoy_str + " vs. prior year." if yoy_str != "—" else ""}'
-        f'</div>', unsafe_allow_html=True
-    )
-
-    # ── Sales Trend ───────────────────────────────────────────────────────────
-    st.markdown('<div class="section-label">Historical Trends</div>', unsafe_allow_html=True)
-    with st.spinner("Rendering sales trend…"):
-        try:
-            st.plotly_chart(plot_sales_trend(df), use_container_width=True)
-        except Exception as exc:
-            st.error(f"Could not render sales trend: {exc}")
-
-    # ── Monthly heatmap ───────────────────────────────────────────────────────
-    with st.spinner("Rendering seasonality heatmap…"):
-        try:
-            st.plotly_chart(plot_monthly_heatmap(df), use_container_width=True)
-        except Exception as exc:
-            st.error(f"Could not render heatmap: {exc}")
-
-    # ── 2-column charts ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-label" style="margin-top:0.5rem;">Store & Product Breakdown</div>', unsafe_allow_html=True)
-    ca, cb = st.columns(2, gap="large")
-    with ca:
-        with st.spinner("Rendering store-type chart…"):
-            try:
-                st.plotly_chart(plot_sales_by_store_type(df), use_container_width=True)
-            except Exception as exc:
-                st.error(f"Could not render store chart: {exc}")
-    with cb:
-        with st.spinner("Rendering promotion impact…"):
-            try:
-                st.plotly_chart(plot_promotion_impact(df), use_container_width=True)
-            except Exception as exc:
-                st.error(f"Could not render promotion chart: {exc}")
-
-    # ── Top families ──────────────────────────────────────────────────────────
-    st.markdown('<div class="section-label" style="margin-top:0.5rem;">Product Family Rankings</div>', unsafe_allow_html=True)
-    top_n = st.slider("Show top N families", 5, 33, 15, key="top_n_slider")
-    with st.spinner("Rendering family rankings…"):
-        try:
-            st.plotly_chart(plot_top_families(df, top_n=top_n), use_container_width=True)
-        except Exception as exc:
-            st.error(f"Could not render family chart: {exc}")
-
-    # ── Data quality ──────────────────────────────────────────────────────────
-    with st.expander("🔍 Data Quality Report"):
-        total_rows = len(df)
-        missing_counts = df[FEATURE_COLUMNS + ["sales"]].isna().sum()
-        missing_df = missing_counts[missing_counts > 0].reset_index()
-        missing_df.columns = ["Column", "Missing Count"]
-        missing_df["Missing %"] = (missing_df["Missing Count"] / total_rows * 100).round(2)
-
-        dq1, dq2, dq3 = st.columns(3)
-        dq1.metric("Total Rows", f"{total_rows:,}")
-        dq2.metric("Zero-Sales Rows", f"{(df['sales'] == 0).sum():,}")
-        dq3.metric("Negative-Sales Rows", f"{(df['sales'] < 0).sum():,}")
-
-        if len(missing_df) > 0:
-            st.dataframe(missing_df, use_container_width=True, hide_index=True)
-        else:
-            st.success("✅ No missing values in feature columns after preprocessing.")
-
-    with st.expander("📐 Summary Statistics"):
-        stats = get_summary_stats(df)
-        st.dataframe(stats.style.background_gradient(cmap="Blues", axis=None),
-                     use_container_width=True)
-
-    with st.expander("🗂️ Data Schema"):
-        col_info = pd.DataFrame({
-            "Column": df.columns,
-            "Type": [str(df[c].dtype) for c in df.columns],
-            "Non-Null": [df[c].notna().sum() for c in df.columns],
-            "Unique Values": [df[c].nunique() for c in df.columns],
-        })
-        st.dataframe(col_info, use_container_width=True, hide_index=True)
-        st.dataframe(df.head(8), use_container_width=True)
-
-    _footer()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE 3 — MODEL TRAINING
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1142,52 +1162,39 @@ def page_training():
     st.markdown("<hr>", unsafe_allow_html=True)
     st.markdown('<div class="section-label">Evaluation Results</div>', unsafe_allow_html=True)
 
-    metrics  = results["metrics"]
+    metrics   = results["metrics"]
     best_name = results["best_model"]
 
-    # Model cards
-    mc_cols = st.columns(len(metrics) * 2, gap="small")
-    for i, (mname, m) in enumerate(metrics.items()):
+    # ── Four metric cards per model: RMSE · MAE · R² · MAPE ─────────────────
+    for mname, m in metrics.items():
         is_best = mname == best_name
-        cls = "model-card best" if is_best else "model-card"
-        trophy = "  🏆" if is_best else ""
-        best_badge = '<div class="mc-best">Best model</div>' if is_best else ""
-        with mc_cols[i * 2]:
-            st.markdown(
-                f'<div class="{cls}">'
-                f'<div class="mc-label">RMSE</div>'
-                f'<div class="mc-name">{mname}{trophy}</div>'
-                f'<div class="mc-value">{m["rmse"]:.2f}</div>'
-                f'<div class="mc-unit">avg error in sales units</div>'
-                f'{best_badge}'
-                f'</div>', unsafe_allow_html=True
-            )
-        with mc_cols[i * 2 + 1]:
-            st.markdown(
-                f'<div class="{cls}">'
-                f'<div class="mc-label">MAE</div>'
-                f'<div class="mc-name">{mname}</div>'
-                f'<div class="mc-value">{m["mae"]:.2f}</div>'
-                f'<div class="mc-unit">mean absolute error</div>'
-                f'</div>', unsafe_allow_html=True
-            )
+        trophy  = "  🏆" if is_best else ""
+        border  = "border:1px solid rgba(99,102,241,0.5);box-shadow:0 0 16px rgba(99,102,241,0.12);" if is_best else ""
+        st.markdown(
+            f'<div class="model-card" style="margin-bottom:0.7rem;{border}">'
+            f'<div class="mc-label" style="text-align:left;margin-bottom:0.5rem;">{mname}{trophy}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("RMSE",  f"{m['rmse']:.2f}",  help="Root Mean Squared Error (sales units) — lower is better")
+        c2.metric("MAE",   f"{m['mae']:.2f}",   help="Mean Absolute Error (sales units) — lower is better")
+        r2_val = m.get("r2", float("nan"))
+        c3.metric("R²",    f"{r2_val:.4f}" if not (r2_val != r2_val) else "—",
+                  help="Coefficient of determination — 1.0 is perfect, higher is better")
+        mape_val = m.get("mape", float("nan"))
+        c4.metric("MAPE",  f"{mape_val:.1f}%" if not (mape_val != mape_val) else "—",
+                  help="Mean Absolute Percentage Error — lower is better; zero-sales rows excluded")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Metric table
-    metrics_df = pd.DataFrame(metrics).T.rename_axis("Model").reset_index().sort_values("rmse")
-    st.dataframe(
-        metrics_df.style
-        .highlight_min(subset=["rmse","mae"], color="#1e2a4a")
-        .format({"rmse":"{:.4f}","mae":"{:.4f}"}),
-        use_container_width=True, hide_index=True,
-    )
-
-    # Interpretation
+    # Interpretation callout
     st.markdown(
-        '<div class="callout callout-indigo" style="margin:0.8rem 0;">'
-        '<b>How to read these metrics:</b> RMSE and MAE measure prediction error in <em>sales units</em>. '
-        'Lower is better. RMSE penalises large errors more; MAE is more robust to outliers. '
+        '<div class="callout callout-indigo" style="margin:1rem 0 0.5rem;">'
+        '<b>How to read these metrics</b> — All measured on the <em>chronological hold-out test set</em> '
+        '(no data leakage). '
+        '<b>RMSE</b>: average error in sales units, penalises large misses more. '
+        '<b>MAE</b>: average absolute error, robust to outliers. '
+        '<b>R²</b>: fraction of variance explained (1.0 = perfect). '
+        '<b>MAPE</b>: percentage error (zero-sales rows excluded to avoid division by zero). '
         f'Evaluation period: dates after <b>{pd.Timestamp(results["cutoff_date"]).date()}</b> '
         f'({results["test_size"]:,} test rows).'
         '</div>', unsafe_allow_html=True
@@ -1199,9 +1206,12 @@ def page_training():
     s2.metric("Test Rows",  f"{results['test_size']:,}")
     s3.metric("Test Cutoff", str(results["cutoff_date"].date()))
 
-    # Bar chart comparison
-    fig_bar = go.Figure()
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    # ── Metric bar chart (RMSE + MAE side-by-side) ────────────────────────────
+    st.markdown('<div class="section-label">Error Metric Comparison</div>', unsafe_allow_html=True)
     model_names = list(metrics.keys())
+    fig_bar = go.Figure()
     for metric_name, color in [("rmse", "#6366f1"), ("mae", "#14b8a6")]:
         vals = [metrics[m][metric_name] for m in model_names]
         fig_bar.add_trace(go.Bar(
@@ -1211,15 +1221,67 @@ def page_training():
             marker_line_width=0,
             hovertemplate=f"<b>%{{x}}</b><br>{metric_name.upper()}: %{{y:.4f}}<extra></extra>",
         ))
-    fig_bar = _plotly_layout(fig_bar, height=280)
+    fig_bar = _plotly_layout(fig_bar, height=260)
     fig_bar.update_layout(
         barmode="group", showlegend=True,
-        title=dict(text="<b>RMSE vs MAE Comparison</b>", font=dict(size=15, color="#e2e8f0"), x=0, xanchor="left"),
+        title=dict(text="<b>RMSE vs MAE — Model Comparison</b>",
+                   font=dict(size=14, color="#e2e8f0"), x=0, xanchor="left"),
         yaxis_title="Error (sales units)",
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
-    # Download model
+    # ── Actual vs Predicted chart ─────────────────────────────────────────────
+    if "test_dates" in results and "y_test" in results and "y_pred_best" in results:
+        st.markdown('<div class="section-label">Actual vs. Predicted — Test Set</div>',
+                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="callout callout-teal" style="margin-bottom:0.8rem;">'
+            f'Showing the <b>{best_name}</b> model predictions against actual sales '
+            f'on the <b>hold-out test set</b> ({results["test_size"]:,} rows). '
+            'Each point is one store/family/day observation. '
+            'Perfect predictions would lie exactly on the diagonal line.'
+            '</div>', unsafe_allow_html=True
+        )
+        y_actual = results["y_test"]
+        y_pred   = results["y_pred_best"]
+        # Sample for performance (scatter with >1M pts is slow)
+        max_pts = 20_000
+        if len(y_actual) > max_pts:
+            import numpy as _np_local
+            idx = _np_local.random.default_rng(42).choice(len(y_actual), max_pts, replace=False)
+            y_actual_plot = y_actual[idx]
+            y_pred_plot   = y_pred[idx]
+            sample_note   = f" (random sample of {max_pts:,}/{len(y_actual):,} points)"
+        else:
+            y_actual_plot = y_actual
+            y_pred_plot   = y_pred
+            sample_note   = ""
+
+        avp_fig = go.Figure()
+        avp_fig.add_trace(go.Scatter(
+            x=y_actual_plot, y=y_pred_plot,
+            mode="markers",
+            name=f"Predictions{sample_note}",
+            marker=dict(color="#6366f1", size=3, opacity=0.4),
+            hovertemplate="Actual: %{x:,.1f}<br>Predicted: %{y:,.1f}<extra></extra>",
+        ))
+        # Perfect prediction diagonal
+        diag_max = float(max(y_actual_plot.max(), y_pred_plot.max())) * 1.05
+        avp_fig.add_trace(go.Scatter(
+            x=[0, diag_max], y=[0, diag_max],
+            mode="lines", name="Perfect prediction",
+            line=dict(color="#14b8a6", width=1.5, dash="dot"),
+        ))
+        avp_fig = _plotly_layout(avp_fig, height=380)
+        avp_fig.update_layout(
+            title=dict(text=f"<b>Actual vs. Predicted Sales — {best_name}</b>",
+                       font=dict(size=14, color="#e2e8f0"), x=0, xanchor="left"),
+            xaxis_title="Actual Sales (units)",
+            yaxis_title="Predicted Sales (units)",
+        )
+        st.plotly_chart(avp_fig, use_container_width=True)
+
+    # ── Download model ────────────────────────────────────────────────────────
     if BEST_MODEL_PATH.exists():
         with open(BEST_MODEL_PATH, "rb") as fh:
             st.download_button(

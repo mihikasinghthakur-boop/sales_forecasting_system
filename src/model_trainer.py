@@ -27,7 +27,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
@@ -52,6 +52,18 @@ def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 def _mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(mean_absolute_error(y_true, y_pred))
+
+
+def _r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(r2_score(y_true, y_pred))
+
+
+def _mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mean Absolute Percentage Error — skips zero-actual rows."""
+    mask = y_true != 0
+    if mask.sum() == 0:
+        return float("nan")
+    return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
 
 
 def time_based_split(
@@ -163,6 +175,7 @@ def train_and_evaluate(
     }
 
     metrics: dict[str, dict[str, float]] = {}
+    predictions: dict[str, np.ndarray] = {}    # store per-model test predictions
 
     for name, pipe in models.items():
         _log(f"Training {name}…")
@@ -171,9 +184,17 @@ def train_and_evaluate(
         preds = np.clip(preds, 0, None)   # sales can't be negative
 
         rmse = _rmse(y_test, preds)
-        mae = _mae(y_test, preds)
-        metrics[name] = {"rmse": round(rmse, 4), "mae": round(mae, 4)}
-        _log(f"  {name}: RMSE={rmse:.4f}  MAE={mae:.4f}")
+        mae  = _mae(y_test, preds)
+        r2   = _r2(y_test, preds)
+        mape = _mape(y_test, preds)
+        metrics[name] = {
+            "rmse": round(rmse, 4),
+            "mae":  round(mae, 4),
+            "r2":   round(r2, 4),
+            "mape": round(mape, 2),
+        }
+        predictions[name] = preds
+        _log(f"  {name}: RMSE={rmse:.4f}  MAE={mae:.4f}  R²={r2:.4f}  MAPE={mape:.2f}%")
 
     # ── 3. Select best (lowest RMSE) ────────────────────────────────────────
     best_name = min(metrics, key=lambda k: metrics[k]["rmse"])
@@ -185,6 +206,10 @@ def train_and_evaluate(
     joblib.dump(best_model, BEST_MODEL_PATH)
     _log(f"Model saved -> {BEST_MODEL_PATH}")
 
+    # Assemble test actuals + best-model predictions for actual-vs-predicted chart
+    test_dates = test_df["date"].values
+    best_preds = predictions[best_name]
+
     return {
         "metrics": metrics,
         "best_model": best_name,
@@ -192,6 +217,9 @@ def train_and_evaluate(
         "cutoff_date": cutoff_date,
         "train_size": len(train_df),
         "test_size": len(test_df),
+        "test_dates": test_dates,
+        "y_test": y_test,
+        "y_pred_best": best_preds,
     }
 
 
