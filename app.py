@@ -513,21 +513,23 @@ def _plotly_layout(fig: go.Figure, height: int = 400) -> go.Figure:
     return fig
 
 
+SAMPLE_DATA_PATH = DATA_DIR / "sample_data.csv"
+
+
 def _check_data_dir() -> bool:
     if not DATA_DIR.exists():
         st.error(
             f"**Data directory not found:** `{DATA_DIR}`\n\n"
-            "Place `train.csv`, `stores.csv`, `oil.csv`, `holidays_events.csv`, "
-            "and `transactions.csv` inside a `data/` folder at the project root.",
+            "Place `train.csv` or `sample_data.csv` inside a `data/` folder at the project root.",
             icon="❌",
         )
         return False
-    if not (DATA_DIR / "train.csv").exists():
+    if not (DATA_DIR / "train.csv").exists() and not SAMPLE_DATA_PATH.exists():
         st.markdown("""
         <div class="callout callout-indigo">
-          <b>train.csv is not available in this deployment.</b><br>
-          The <b>Dashboard & EDA</b> and <b>Model Training</b> pages require the full
-          Kaggle <em>Store Sales</em> dataset (~116 MB).<br><br>
+          <b>Dataset is not available in this deployment.</b><br>
+          The <b>Dashboard & EDA</b> and <b>Model Training</b> pages require either <code>sample_data.csv</code>
+          or the full Kaggle <em>Store Sales</em> dataset (<code>train.csv</code> ~116 MB).<br><br>
           Download from
           <a href="https://www.kaggle.com/competitions/store-sales-time-series-forecasting/data"
              target="_blank" style="color:#a5b4fc;">Kaggle — Store Sales Time Series Forecasting</a>
@@ -537,6 +539,20 @@ def _check_data_dir() -> bool:
         """, unsafe_allow_html=True)
         return False
     return True
+
+
+def _load_analytical_data() -> pd.DataFrame:
+    """Load analytical dataset: full train.csv if present, otherwise sample_data.csv."""
+    if (DATA_DIR / "train.csv").exists():
+        return build_dataset()
+    elif SAMPLE_DATA_PATH.exists():
+        df = pd.read_csv(SAMPLE_DATA_PATH, parse_dates=["date"])
+        if "day_of_week" not in df.columns:
+            df = preprocess(df)
+        return df
+    else:
+        raise FileNotFoundError("Neither train.csv nor sample_data.csv found in data directory.")
+
 
 
 def _footer():
@@ -1020,9 +1036,15 @@ def page_dashboard():
             _footer()
             return
         if not st.session_state["data_loaded"] or st.session_state["df"] is None:
-            with st.spinner("Loading and merging CSV files — this takes ~15 seconds…"):
+            train_exists = (DATA_DIR / "train.csv").exists()
+            load_msg = (
+                "Loading and merging CSV files — this takes ~15 seconds…"
+                if train_exists
+                else "Loading Favorita dataset snapshot…"
+            )
+            with st.spinner(load_msg):
                 try:
-                    df = build_dataset()
+                    df = _load_analytical_data()
                     st.session_state["df"] = df
                     st.session_state["data_loaded"] = True
                 except Exception as exc:
@@ -1031,22 +1053,78 @@ def page_dashboard():
         else:
             df = st.session_state["df"]
 
+        if not (DATA_DIR / "train.csv").exists() and SAMPLE_DATA_PATH.exists():
+            st.markdown(
+                f'<div class="callout callout-indigo" style="margin-bottom:1rem;">'
+                f'💡 <b>Demo Snapshot Active:</b> Analyzing curated 2017 Favorita store sales '
+                f'({len(df):,} records · {df["store_nbr"].nunique()} stores · {df["family"].nunique()} product families). '
+                f'Explore historical patterns below or choose <b>Upload my own CSV</b> above to analyze custom data.'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
     if df is None:
         _footer()
         return
 
+    # ── Interactive Dashboard Filters ──────────────────────────────────────
+    with st.expander("⚡ Filter Dashboard Data", expanded=False):
+        f1, f2, f3 = st.columns([1, 1, 1])
+        with f1:
+            all_stores = sorted(df["store_nbr"].unique().tolist())
+            sel_stores = st.multiselect(
+                "Filter by Store",
+                options=all_stores,
+                default=all_stores,
+                key="dash_filter_stores",
+            )
+        with f2:
+            all_fams = sorted(df["family"].unique().tolist()) if "family" in df.columns else []
+            sel_fams = st.multiselect(
+                "Filter by Product Family",
+                options=all_fams,
+                default=all_fams,
+                key="dash_filter_fams",
+            )
+        with f3:
+            d_min = pd.to_datetime(df["date"]).min().date()
+            d_max = pd.to_datetime(df["date"]).max().date()
+            sel_dates = st.date_input(
+                "Filter by Date Range",
+                value=(d_min, d_max),
+                min_value=d_min,
+                max_value=d_max,
+                key="dash_filter_dates",
+            )
+
+    view_df = df.copy()
+    if sel_stores:
+        view_df = view_df[view_df["store_nbr"].isin(sel_stores)]
+    if sel_fams and "family" in view_df.columns:
+        view_df = view_df[view_df["family"].isin(sel_fams)]
+    if isinstance(sel_dates, (list, tuple)) and len(sel_dates) == 2:
+        view_df = view_df[
+            (pd.to_datetime(view_df["date"]).dt.date >= sel_dates[0]) &
+            (pd.to_datetime(view_df["date"]).dt.date <= sel_dates[1])
+        ]
+
+    if view_df.empty:
+        st.warning("⚠️ No data points match your filter criteria. Please broaden your selection.")
+        _footer()
+        return
+
     # ── KPI row ───────────────────────────────────────────────────────
-    total_sales  = df["sales"].sum()
-    avg_daily    = df.groupby("date")["sales"].sum().mean()
-    n_stores     = df["store_nbr"].nunique()
-    n_families   = df["family"].nunique() if "family" in df.columns else "N/A"
-    n_rows       = len(df)
-    date_min     = df["date"].min()
-    date_max     = df["date"].max()
+    total_sales  = view_df["sales"].sum()
+    avg_daily    = view_df.groupby("date")["sales"].sum().mean()
+    n_stores     = view_df["store_nbr"].nunique()
+    n_families   = view_df["family"].nunique() if "family" in view_df.columns else "N/A"
+    n_rows       = len(view_df)
+    date_min     = pd.to_datetime(view_df["date"]).min()
+    date_max     = pd.to_datetime(view_df["date"]).max()
     date_span    = (date_max - date_min).days
 
     # YoY growth (last year vs. penultimate year)
-    df_yr = df.copy()
+    df_yr = view_df.copy()
     df_yr["year"] = pd.to_datetime(df_yr["date"]).dt.year
     yr_sales = df_yr.groupby("year")["sales"].sum()
     years = sorted(yr_sales.index)
@@ -1059,18 +1137,23 @@ def page_dashboard():
     # ── KPI cards ───────────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-label">Key Metrics</div>', unsafe_allow_html=True)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total Sales", f"{total_sales/1e6:.2f}M",
-              help="Aggregate unit sales across all rows")
+    sales_disp = (
+        f"{total_sales/1e6:.2f}M" if total_sales >= 1e6
+        else f"{total_sales/1e3:.1f}k" if total_sales >= 1e3
+        else f"{total_sales:,.0f}"
+    )
+    m1.metric("Total Sales", sales_disp,
+              help="Aggregate unit sales across all selected rows")
     m2.metric("Daily Average", f"{avg_daily:,.0f}",
-              help="Mean total daily sales (all stores/families combined)")
+              help="Mean total daily sales (all selected stores/families combined)")
     m3.metric("Stores", n_stores)
     m4.metric("Product Families", n_families)
     m5.metric("YoY Growth", yoy_str,
               help=f"{years[-1]} vs {years[-2]}" if len(years) >= 2 else "")
 
     # Insight banner
-    top_family = df.groupby("family")["sales"].sum().idxmax() if "family" in df.columns else "N/A"
-    top_store  = df.groupby("store_nbr")["sales"].sum().idxmax() if "store_nbr" in df.columns else "N/A"
+    top_family = view_df.groupby("family")["sales"].sum().idxmax() if "family" in view_df.columns else "N/A"
+    top_store  = view_df.groupby("store_nbr")["sales"].sum().idxmax() if "store_nbr" in view_df.columns else "N/A"
     st.markdown(
         f'<div class="insight-card" style="margin:0.8rem 0 1.5rem;">'
         f'<strong>Dataset snapshot:</strong> {n_rows:,} records spanning '
@@ -1085,13 +1168,13 @@ def page_dashboard():
     st.markdown('<div class="section-label">Historical Trends</div>', unsafe_allow_html=True)
     with st.spinner("Rendering sales trend…"):
         try:
-            st.plotly_chart(plot_sales_trend(df), use_container_width=True)
+            st.plotly_chart(plot_sales_trend(view_df), use_container_width=True)
         except Exception as exc:
             st.error(f"Could not render sales trend: {exc}")
 
     with st.spinner("Rendering seasonality heatmap…"):
         try:
-            st.plotly_chart(plot_monthly_heatmap(df), use_container_width=True)
+            st.plotly_chart(plot_monthly_heatmap(view_df), use_container_width=True)
         except Exception as exc:
             st.error(f"Could not render heatmap: {exc}")
 
@@ -1101,43 +1184,43 @@ def page_dashboard():
     with ca:
         with st.spinner("Rendering store-type chart…"):
             try:
-                st.plotly_chart(plot_sales_by_store_type(df), use_container_width=True)
+                st.plotly_chart(plot_sales_by_store_type(view_df), use_container_width=True)
             except Exception as exc:
                 st.error(f"Could not render store chart: {exc}")
     with cb:
         with st.spinner("Rendering promotion impact…"):
             try:
-                st.plotly_chart(plot_promotion_impact(df), use_container_width=True)
+                st.plotly_chart(plot_promotion_impact(view_df), use_container_width=True)
             except Exception as exc:
                 st.error(f"Could not render promotion chart: {exc}")
 
     # ── Top families ─────────────────────────────────────────────────────────────────────────
-    if "family" in df.columns:
+    if "family" in view_df.columns:
         st.markdown('<div class="section-label" style="margin-top:0.5rem;">Product Family Rankings</div>', unsafe_allow_html=True)
-        _max_fam = df["family"].nunique()
-        top_n = st.slider("Show top N families", 3, min(33, _max_fam), min(15, _max_fam), key="top_n_slider")
+        _max_fam = view_df["family"].nunique()
+        top_n = st.slider("Show top N families", min(3, _max_fam), min(33, _max_fam), min(15, _max_fam), key="top_n_slider")
         with st.spinner("Rendering family rankings…"):
             try:
-                st.plotly_chart(plot_top_families(df, top_n=top_n), use_container_width=True)
+                st.plotly_chart(plot_top_families(view_df, top_n=top_n), use_container_width=True)
             except Exception as exc:
                 st.error(f"Could not render family chart: {exc}")
 
     # ── Data quality ───────────────────────────────────────────────────────────────────
     with st.expander("🔍 Data Quality Report"):
-        total_rows = len(df)
-        available_feat = [c for c in FEATURE_COLUMNS if c in df.columns]
-        missing_counts = df[available_feat + ["sales"]].isna().sum()
+        total_rows = len(view_df)
+        available_feat = [c for c in FEATURE_COLUMNS if c in view_df.columns]
+        missing_counts = view_df[available_feat + ["sales"]].isna().sum()
         missing_df2 = missing_counts[missing_counts > 0].reset_index()
         missing_df2.columns = ["Column", "Missing Count"]
         missing_df2["Missing %"] = (missing_df2["Missing Count"] / total_rows * 100).round(2)
 
         dq1, dq2, dq3, dq4 = st.columns(4)
         dq1.metric("Total Rows", f"{total_rows:,}")
-        dq2.metric("Zero-Sales Rows", f"{(df['sales'] == 0).sum():,}",
+        dq2.metric("Zero-Sales Rows", f"{(view_df['sales'] == 0).sum():,}",
                    help="Rows where sales = 0 (may be legitimate: closed stores, no demand)")
-        dq3.metric("Negative-Sales Rows", f"{(df['sales'] < 0).sum():,}",
+        dq3.metric("Negative-Sales Rows", f"{(view_df['sales'] < 0).sum():,}",
                    help="May represent returns or adjustments — preserved, not removed")
-        dq4.metric("Duplicate Rows", f"{df.duplicated().sum():,}")
+        dq4.metric("Duplicate Rows", f"{view_df.duplicated().sum():,}")
 
         if len(missing_df2) > 0:
             st.warning("Some columns have missing values (see below).")
@@ -1147,27 +1230,27 @@ def page_dashboard():
 
     with st.expander("📐 Summary Statistics"):
         try:
-            stats = get_summary_stats(df)
+            stats = get_summary_stats(view_df)
             st.dataframe(stats, use_container_width=True)
         except Exception as exc:
             st.error(f"Could not compute summary statistics: {exc}")
 
     with st.expander("🗂️ Data Schema & Preview"):
         col_info = pd.DataFrame({
-            "Column": df.columns,
-            "Type": [str(df[c].dtype) for c in df.columns],
-            "Non-Null": [int(df[c].notna().sum()) for c in df.columns],
-            "Unique Values": [int(df[c].nunique()) for c in df.columns],
+            "Column": view_df.columns,
+            "Type": [str(view_df[c].dtype) for c in view_df.columns],
+            "Non-Null": [int(view_df[c].notna().sum()) for c in view_df.columns],
+            "Unique Values": [int(view_df[c].nunique()) for c in view_df.columns],
         })
         st.dataframe(col_info, use_container_width=True, hide_index=True)
-        st.caption(f"Showing first 8 of {len(df):,} rows")
-        st.dataframe(df.head(8), use_container_width=True)
+        st.caption(f"Showing first 8 of {len(view_df):,} rows")
+        st.dataframe(view_df.head(8), use_container_width=True)
 
     # ── Cleaned data download ────────────────────────────────────────────────
     st.markdown('<div class="section-label" style="margin-top:1rem;">Export</div>', unsafe_allow_html=True)
     export_cols = [c for c in ["date", "store_nbr", "family", "sales", "onpromotion"] + FEATURE_COLUMNS
-                   if c in df.columns]
-    export_df = df[export_cols].copy()
+                   if c in view_df.columns]
+    export_df = view_df[export_cols].copy()
     if "date" in export_df.columns:
         export_df["date"] = pd.to_datetime(export_df["date"]).dt.date
     st.download_button(
@@ -1224,12 +1307,18 @@ def page_training():
         '<span class="step-badge">1</span> <b style="color:#e2e8f0;">Load & Preprocess Data</b>',
         unsafe_allow_html=True,
     )
-    st.caption("Merges train.csv ← stores ← oil (ffill) ← holidays (deduped) ← transactions.")
+    st.caption("Loads analytical dataset (full train.csv or bundled Favorita snapshot) with engineered features.")
 
     if st.button("🔄 Load & Preprocess Data", key="btn_load"):
-        with st.spinner("Loading and merging all tables — this may take 15–30 s…"):
+        train_exists = (DATA_DIR / "train.csv").exists()
+        spinner_msg = (
+            "Loading and merging all tables — this may take 15–30 s…"
+            if train_exists
+            else "Loading Favorita dataset snapshot…"
+        )
+        with st.spinner(spinner_msg):
             try:
-                df = build_dataset()
+                df = _load_analytical_data()
                 st.session_state["df"] = df
                 st.session_state["data_loaded"] = True
                 st.success(

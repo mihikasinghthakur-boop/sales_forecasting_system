@@ -281,7 +281,7 @@ def plot_monthly_heatmap(df: pd.DataFrame) -> go.Figure:
         showscale=True,
         colorbar=dict(
             tickfont=dict(color=C_SLATE, size=11),
-            outlinecolor="transparent",
+            outlinecolor=BG_TRANSPARENT,
             len=0.7,
         ),
     ))
