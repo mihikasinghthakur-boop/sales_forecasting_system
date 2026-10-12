@@ -843,10 +843,15 @@ def page_forecaster():
                 display_df["onpromotion"] = display_df["onpromotion"].map({0:"No", 1:"Yes"})
                 display_df.columns = ["Date","Store","Family","Promotion","Predicted Sales"]
                 st.dataframe(
-                    display_df.style
-                    .background_gradient(subset=["Predicted Sales"], cmap="Blues")
-                    .format({"Predicted Sales": "{:.1f}"}),
+                    display_df,
                     use_container_width=True, hide_index=True, height=240,
+                    column_config={
+                        "Predicted Sales": st.column_config.NumberColumn(
+                            "Predicted Sales",
+                            format="%.1f",
+                            help="Daily predicted unit sales from XGBoost model",
+                        )
+                    },
                 )
 
     # Download
@@ -1039,6 +1044,143 @@ def page_dashboard():
     date_min     = df["date"].min()
     date_max     = df["date"].max()
     date_span    = (date_max - date_min).days
+
+    # YoY growth (last year vs. penultimate year)
+    df_yr = df.copy()
+    df_yr["year"] = pd.to_datetime(df_yr["date"]).dt.year
+    yr_sales = df_yr.groupby("year")["sales"].sum()
+    years = sorted(yr_sales.index)
+    if len(years) >= 2:
+        yoy = (yr_sales[years[-1]] - yr_sales[years[-2]]) / yr_sales[years[-2]] * 100
+        yoy_str = f"{yoy:+.1f}% YoY"
+    else:
+        yoy_str = "N/A"
+
+    # ── KPI cards ───────────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Key Metrics</div>', unsafe_allow_html=True)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total Sales", f"{total_sales/1e6:.2f}M",
+              help="Aggregate unit sales across all rows")
+    m2.metric("Daily Average", f"{avg_daily:,.0f}",
+              help="Mean total daily sales (all stores/families combined)")
+    m3.metric("Stores", n_stores)
+    m4.metric("Product Families", n_families)
+    m5.metric("YoY Growth", yoy_str,
+              help=f"{years[-1]} vs {years[-2]}" if len(years) >= 2 else "")
+
+    # Insight banner
+    top_family = df.groupby("family")["sales"].sum().idxmax() if "family" in df.columns else "N/A"
+    top_store  = df.groupby("store_nbr")["sales"].sum().idxmax() if "store_nbr" in df.columns else "N/A"
+    st.markdown(
+        f'<div class="insight-card" style="margin:0.8rem 0 1.5rem;">'
+        f'<strong>Dataset snapshot:</strong> {n_rows:,} records spanning '
+        f'<strong>{date_span} days</strong> ({date_min.date()} → {date_max.date()}). '
+        f'Top-selling family: <strong>{top_family}</strong>. '
+        f'Highest-volume store: <strong>Store {top_store}</strong>. '
+        f'{"Last full year saw " + yoy_str + " vs. prior year." if yoy_str != "N/A" else ""}'
+        f'</div>', unsafe_allow_html=True
+    )
+
+    # ── Sales Trend ────────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Historical Trends</div>', unsafe_allow_html=True)
+    with st.spinner("Rendering sales trend…"):
+        try:
+            st.plotly_chart(plot_sales_trend(df), use_container_width=True)
+        except Exception as exc:
+            st.error(f"Could not render sales trend: {exc}")
+
+    with st.spinner("Rendering seasonality heatmap…"):
+        try:
+            st.plotly_chart(plot_monthly_heatmap(df), use_container_width=True)
+        except Exception as exc:
+            st.error(f"Could not render heatmap: {exc}")
+
+    # ── 2-column charts ─────────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-label" style="margin-top:0.5rem;">Store &amp; Product Breakdown</div>', unsafe_allow_html=True)
+    ca, cb = st.columns(2, gap="large")
+    with ca:
+        with st.spinner("Rendering store-type chart…"):
+            try:
+                st.plotly_chart(plot_sales_by_store_type(df), use_container_width=True)
+            except Exception as exc:
+                st.error(f"Could not render store chart: {exc}")
+    with cb:
+        with st.spinner("Rendering promotion impact…"):
+            try:
+                st.plotly_chart(plot_promotion_impact(df), use_container_width=True)
+            except Exception as exc:
+                st.error(f"Could not render promotion chart: {exc}")
+
+    # ── Top families ─────────────────────────────────────────────────────────────────────────
+    if "family" in df.columns:
+        st.markdown('<div class="section-label" style="margin-top:0.5rem;">Product Family Rankings</div>', unsafe_allow_html=True)
+        _max_fam = df["family"].nunique()
+        top_n = st.slider("Show top N families", 3, min(33, _max_fam), min(15, _max_fam), key="top_n_slider")
+        with st.spinner("Rendering family rankings…"):
+            try:
+                st.plotly_chart(plot_top_families(df, top_n=top_n), use_container_width=True)
+            except Exception as exc:
+                st.error(f"Could not render family chart: {exc}")
+
+    # ── Data quality ───────────────────────────────────────────────────────────────────
+    with st.expander("🔍 Data Quality Report"):
+        total_rows = len(df)
+        available_feat = [c for c in FEATURE_COLUMNS if c in df.columns]
+        missing_counts = df[available_feat + ["sales"]].isna().sum()
+        missing_df2 = missing_counts[missing_counts > 0].reset_index()
+        missing_df2.columns = ["Column", "Missing Count"]
+        missing_df2["Missing %"] = (missing_df2["Missing Count"] / total_rows * 100).round(2)
+
+        dq1, dq2, dq3, dq4 = st.columns(4)
+        dq1.metric("Total Rows", f"{total_rows:,}")
+        dq2.metric("Zero-Sales Rows", f"{(df['sales'] == 0).sum():,}",
+                   help="Rows where sales = 0 (may be legitimate: closed stores, no demand)")
+        dq3.metric("Negative-Sales Rows", f"{(df['sales'] < 0).sum():,}",
+                   help="May represent returns or adjustments — preserved, not removed")
+        dq4.metric("Duplicate Rows", f"{df.duplicated().sum():,}")
+
+        if len(missing_df2) > 0:
+            st.warning("Some columns have missing values (see below).")
+            st.dataframe(missing_df2, use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ No missing values in key columns after preprocessing.")
+
+    with st.expander("📐 Summary Statistics"):
+        try:
+            stats = get_summary_stats(df)
+            st.dataframe(stats, use_container_width=True)
+        except Exception as exc:
+            st.error(f"Could not compute summary statistics: {exc}")
+
+    with st.expander("🗂️ Data Schema & Preview"):
+        col_info = pd.DataFrame({
+            "Column": df.columns,
+            "Type": [str(df[c].dtype) for c in df.columns],
+            "Non-Null": [int(df[c].notna().sum()) for c in df.columns],
+            "Unique Values": [int(df[c].nunique()) for c in df.columns],
+        })
+        st.dataframe(col_info, use_container_width=True, hide_index=True)
+        st.caption(f"Showing first 8 of {len(df):,} rows")
+        st.dataframe(df.head(8), use_container_width=True)
+
+    # ── Cleaned data download ────────────────────────────────────────────────
+    st.markdown('<div class="section-label" style="margin-top:1rem;">Export</div>', unsafe_allow_html=True)
+    export_cols = [c for c in ["date", "store_nbr", "family", "sales", "onpromotion"] + FEATURE_COLUMNS
+                   if c in df.columns]
+    export_df = df[export_cols].copy()
+    if "date" in export_df.columns:
+        export_df["date"] = pd.to_datetime(export_df["date"]).dt.date
+    st.download_button(
+        label="⬇️ Download Cleaned Dataset (CSV)",
+        data=export_df.to_csv(index=False).encode(),
+        file_name="sales_cleaned.csv",
+        mime="text/csv",
+        key="dl_cleaned",
+    )
+
+    _footer()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE 3 — MODEL TRAINING
 # ═══════════════════════════════════════════════════════════════════════════
